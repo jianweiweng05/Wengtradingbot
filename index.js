@@ -4,6 +4,8 @@
 const IS_PAPER_TRADING_MODE = true; // true = 影子交易模式, false = 3Commas实盘模式
 const ACCOUNT_ID_3COMMAS = 33257245; // 您的3Commas账户ID
 const MOCK_ACCOUNT_VALUE_USD = 100000; // 您的10万U模拟总资金
+const STATE_EXPIRATION_HOURS_BULL = 168; // 牛市状态有效期 (7天)
+const STATE_EXPIRATION_HOURS_BEAR = 72;  // 熊市状态有效期 (72小时)
 
 // =================================================================
 // 2. 导入“零件”
@@ -19,7 +21,6 @@ const crypto = require('crypto');
 const app = express();
 app.use(express.json());
 
-// 从环境变量获取秘密信息
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN;
@@ -28,16 +29,12 @@ const webhookSecret = process.env.WEBHOOK_SECRET;
 const threesApiKey = process.env.THREES_API_KEY;
 const threesApiSecret = process.env.THREES_API_SECRET;
 
-// 初始化客户端
 const supabase = createClient(supabaseUrl, supabaseKey);
-
-// !! V6核心升级：优化Telegram Bot的初始化和轮询启动方式 !!
-const bot = new TelegramBot(telegramBotToken);
-bot.startPolling();
+const bot = new TelegramBot(telegramBotToken, { polling: true });
 
 
 // =================================================================
-// 4. 辅助函数 (保持不变)
+// 4. 辅助函数
 // =================================================================
 async function sendTelegramMessage(message) {
   if (!telegramChatId) {
@@ -59,26 +56,51 @@ async function createSmartTrade(tradeParams) {
 }
 
 // =================================================================
-// 5. Telegram 交互式指令 (保持不变)
+// 5. Telegram 交互式指令 - V6升级版
 // =================================================================
 bot.onText(/\/status/, async (msg) => {
   if (msg.chat.id.toString() !== telegramChatId) return;
   await sendTelegramMessage('📊 **正在获取系统状态...**');
+  
   const { data: macroState, error: stateError } = await supabase.from('macro_state').select('*').limit(1).single();
+  if (stateError) return await sendTelegramMessage('🚨 获取宏观状态失败!');
+
+  let stateDetail = '状态未知';
+  if (macroState.market_state === 'BULL') {
+      if (macroState.btc_state === 'LONG' && macroState.eth_state === 'LONG') stateDetail = '双牛 (BTC & ETH)';
+      else if (macroState.btc_state === 'LONG') stateDetail = '牛 (BTC主导)';
+      else if (macroState.eth_state === 'LONG') stateDetail = '牛 (ETH主导)';
+  } else if (macroState.market_state === 'BEAR') {
+      if (macroState.btc_state === 'SHORT' && macroState.eth_state === 'SHORT') stateDetail = '双熊 (BTC & ETH)';
+      else if (macroState.btc_state === 'SHORT') stateDetail = '熊 (BTC主导)';
+      else if (macroState.eth_state === 'SHORT') stateDetail = '熊 (ETH主导)';
+  } else {
+      stateDetail = '无明确方向';
+  }
+
+  let lastSignalTimeInfo = '(暂无记录)';
+  if (macroState.last_major_signal_at && macroState.last_major_signal_name) {
+      const lastSignalDate = new Date(macroState.last_major_signal_at);
+      const hoursAgo = ((new Date() - lastSignalDate) / (1000 * 60 * 60)).toFixed(1);
+      lastSignalTimeInfo = `${hoursAgo} 小时前 (\`${macroState.last_major_signal_name}\`)`;
+  }
+
   const { count: paperCount } = await supabase.from('paper_trades').select('*', { count: 'exact', head: true });
   const { count: liveCount } = await supabase.from('positions').select('*', { count: 'exact', head: true });
-  if (stateError) {
-    await sendTelegramMessage('🚨 获取宏观状态失败!');
-    return;
-  }
+
   const statusReport = `
-*--- 系统状态报告 ---*
-- **宏观状态**: \`${macroState.current_state}\`
-- **当前杠杆**: \`${macroState.leverage}x\`
-- **人工总闸**: \`${macroState.manual_override ? '开启 (已暂停)' : '关闭 (运行中)'}\`
+*--- 宏观状态 (L1) ---*
+- **市场状态**: \`${macroState.market_state}\`
+- **状态详情**: \`${stateDetail}\`
+- **默认杠杆**: \`${macroState.leverage}x\`
+- **宏观系数**: \`${macroState.macro_coefficient}\`
+- **最后一级信号**: ${lastSignalTimeInfo}
+
+*--- 账户与模式 ---*
 - **模拟持仓**: \`${paperCount || 0}\` 笔
 - **实盘持仓**: \`${liveCount || 0}\` 笔
 - **运行模式**: \`${IS_PAPER_TRADING_MODE ? '影子交易' : '实盘交易'}\`
+- **人工总闸**: \`${macroState.manual_override ? '开启 (暂停中)' : '关闭 (运行中)'}\`
   `;
   await sendTelegramMessage(statusReport);
 });
@@ -115,8 +137,9 @@ bot.onText(/\/confirm_panic/, async (msg) => {
     }
 });
 
+
 // =================================================================
-// 6. Webhook 核心逻辑 (保持不变)
+// 6. Webhook 核心逻辑 - V6最终版
 // =================================================================
 app.post('/webhook', async (req, res) => {
   const incomingData = req.body;
@@ -143,10 +166,40 @@ app.post('/webhook', async (req, res) => {
   }
 
   if (isLevelOne) {
-    await sendTelegramMessage(`📈 **宏观信号分析** 📈\n收到一级信号 \`${strategy_name}\`。\n*(注: 状态更新逻辑待实现)*`);
+    const updates = {
+      last_major_signal_at: new Date().toISOString(),
+      last_major_signal_name: strategy_name,
+    };
+    if (strategy_name.includes('多')) {
+        if (strategy_name.startsWith('BTC')) updates.btc_state = 'LONG';
+        if (strategy_name.startsWith('ETH')) updates.eth_state = 'LONG';
+    } else if (strategy_name.includes('空')) {
+        if (strategy_name.startsWith('BTC')) updates.btc_state = 'SHORT';
+        if (strategy_name.startsWith('ETH')) updates.eth_state = 'SHORT';
+    }
+
+    const { data: currentState } = await supabase.from('macro_state').select('btc_state, eth_state').single();
+    const newState = { ...currentState, ...updates };
+
+    if (newState.btc_state === 'SHORT' || newState.eth_state === 'SHORT') {
+        updates.market_state = 'BEAR';
+        updates.leverage = 1;
+    } else if (newState.btc_state === 'LONG' || newState.eth_state === 'LONG') {
+        updates.market_state = 'BULL';
+        updates.leverage = 3;
+    }
+    
+    const { error } = await supabase.from('macro_state').update(updates).eq('id', 1);
+    if (error) await sendTelegramMessage(`🚨 **宏观状态更新失败**: ${error.message}`);
+    else await sendTelegramMessage(`📈 **宏观状态已更新** 📈\n市场进入: \`${updates.market_state || '变化中'}\`\n触发信号: \`${strategy_name}\``);
+
   } else {
-    const marketDirection = macroState.current_state === '牛' ? '多' : '空';
-    if (direction !== marketDirection) {
+    // 【二/三/四级信号逻辑】
+    let marketDirection = '中性';
+    if(macroState.market_state === 'BULL') marketDirection = '多';
+    if(macroState.market_state === 'BEAR') marketDirection = '空';
+
+    if (marketDirection !== '中性' && direction !== marketDirection) {
       await sendTelegramMessage(`❌ **信号被过滤** ❌\n原因: 信号方向 (\`${direction}\`) 与当前宏观状态 (\`${marketDirection}\`) 不符。`);
       return res.status(200).send('Signal filtered: direction mismatch.');
     }
@@ -173,15 +226,39 @@ app.post('/webhook', async (req, res) => {
       });
     }
   }
-
   res.status(200).send('Alert processed');
 });
 
 // =================================================================
-// 7. 启动服务器
+// 7. 定时任务 - V6新增功能
+// =================================================================
+setInterval(async () => {
+    const { data: macroState, error } = await supabase.from('macro_state').select('*').limit(1).single();
+    if (error || !macroState || !macroState.last_major_signal_at || macroState.market_state === 'NEUTRAL') return;
+
+    const expiryHours = macroState.market_state === 'BULL' ? STATE_EXPIRATION_HOURS_BULL : STATE_EXPIRATION_HOURS_BEAR;
+    const hoursSinceLastSignal = (new Date() - new Date(macroState.last_major_signal_at)) / (1000 * 60 * 60);
+
+    if (hoursSinceLastSignal > expiryHours) {
+        const { error: updateError } = await supabase.from('macro_state').update({
+            market_state: 'NEUTRAL',
+            btc_state: 'NONE',
+            eth_state: 'NONE',
+            leverage: 1,
+            last_major_signal_name: '超时回归'
+        }).eq('id', 1);
+
+        if (updateError) await sendTelegramMessage('🚨 自动回归中性状态失败！');
+        else await sendTelegramMessage('⌛️ **状态超时** ⌛️\n长时间无一级信号，市场状态已自动回归 **中性(NEUTRAL)**。');
+    }
+}, 1000 * 60 * 60); // 每小时检查一次
+
+
+// =================================================================
+// 8. 启动服务器
 // =================================================================
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`V6 Engine is running on port ${port}. Mode: ${IS_PAPER_TRADING_MODE ? 'Paper Trading' : 'Live Trading'}`);
-  sendTelegramMessage(`✅ **V6交互式引擎启动成功** ✅\n当前模式: **${IS_PAPER_TRADING_MODE ? '影子交易' : '实盘交易'}**\n\n您现在可以使用 /status, /pause, /resume 等指令与我互动。`);
+  sendTelegramMessage(`✅ **V6最终版引擎启动成功** ✅\n当前模式: **${IS_PAPER_TRADING_MODE ? '影子交易' : '实盘交易'}**\n\n您现在可以使用 /status, /pause, /resume 等指令与我互动。`);
 });

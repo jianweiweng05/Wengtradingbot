@@ -6,10 +6,10 @@ const ACCOUNT_ID_3COMMAS = 33257245;     // 您的3Commas账户ID
 const MOCK_ACCOUNT_VALUE_USD = 100000;   // 您的10万U模拟总资金
 const STATE_EXPIRATION_HOURS_BULL = 168; // 牛市状态有效期 (7天)
 const STATE_EXPIRATION_HOURS_BEAR = 72;  // 熊市状态有效期 (72小时)
-const TELEGRAM_WEBHOOK_PATH = '/telegram-webhook'; // 我们接收Telegram指令的秘密路径
+const TELEGRAM_WEBHOOK_PATH = '/telegram-webhook-endpoint-a7b3c9x'; // 一个随机的、更安全的路径
 
 // =================================================================
-// 2. 导入与初始化 (和之前一样，只是更整洁)
+// 2. 导入与初始化
 // =================================================================
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -28,25 +28,25 @@ const {
   WEBHOOK_SECRET,
   THREES_API_KEY,
   THREES_API_SECRET,
-  RENDER_EXTERNAL_URL // Render会自动提供这个
+  RENDER_EXTERNAL_URL
 } = process.env;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
+const bot = new TelegramBot(TELEGRAM_BOT_TOKEN); // 在Webhook模式下，不需要 polling: true
 
 
 // =================================================================
-// 3. 核心功能模块 (职责分离，清晰明了)
+// 3. 核心功能模块
 // =================================================================
 
 /**
  * 模块一：Telegram 通信模块
  */
-async function sendTelegramMessage(message) {
+async function sendTelegramMessage(chatId, message) {
   try {
-    await bot.sendMessage(TELEGRAM_CHAT_ID, message, { parse_mode: 'Markdown', disable_web_page_preview: true });
+    await bot.sendMessage(chatId, message, { parse_mode: 'Markdown', disable_web_page_preview: true });
   } catch (error) {
-    console.error('Error sending Telegram message:', error.message);
+    console.error(`Error sending Telegram message to ${chatId}:`, error.message);
   }
 }
 
@@ -55,9 +55,9 @@ async function sendTelegramMessage(message) {
  */
 async function createSmartTrade(tradeParams) {
     console.log(`[LIVE MODE] Executing trade on 3Commas:`, tradeParams);
-    await sendTelegramMessage(`✅ **[实盘]** 已向3Commas提交订单: \`${tradeParams.pair}\``);
-    // 真实的3Commas API调用逻辑... (此处为模拟)
-    return { success: true, id: 'live_trade_' + Date.now() };
+    await sendTelegramMessage(TELEGRAM_CHAT_ID, `✅ **[实盘]** 已向3Commas提交订单: \`${tradeParams.pair}\``);
+    // 实际的3Commas API调用逻辑... (此处为模拟)
+    return { success: true, id: 'live_trade_id_' + Date.now() };
 }
 
 /**
@@ -65,26 +65,34 @@ async function createSmartTrade(tradeParams) {
  */
 async function handleTelegramCommands(message) {
   if (!message || !message.text) return;
-  if (message.chat.id.toString() !== TELEGRAM_CHAT_ID) return; // 安全检查
+  
+  // 安全检查：只响应您自己的命令
+  if (message.chat.id.toString() !== TELEGRAM_CHAT_ID) {
+      console.warn(`Unauthorized command from chat ID: ${message.chat.id}`);
+      return;
+  }
 
-  const command = message.text.split(' ')[0]; // 只取命令本身
+  const command = message.text.split(' ')[0];
 
   if (command === '/status') {
+    await sendTelegramMessage(TELEGRAM_CHAT_ID, '📊 **正在获取系统状态...**');
     const { data: macroState } = await supabase.from('macro_state').select('*').single();
     const { count: paperCount } = await supabase.from('paper_trades').select('*', { count: 'exact', head: true });
-    // ... (省略了完整的报告生成代码，因为它很长，但逻辑不变)
-    const statusReport = `*--- 系统状态报告 ---*\n- **市场状态**: \`${macroState.market_state}\`\n... (其他信息)`;
-    await sendTelegramMessage(statusReport);
+    
+    let stateDetail = '无明确方向';
+    // ... (此处省略了V6版本中完整的、详细的状态报告生成逻辑)
+    
+    const statusReport = `*--- 系统状态报告 ---*\n- **市场状态**: \`${macroState.market_state}\`\n- **模拟持仓**: \`${paperCount || 0}\` 笔\n...`;
+    await sendTelegramMessage(TELEGRAM_CHAT_ID, statusReport);
   } 
   else if (command === '/pause') {
     await supabase.from('macro_state').update({ manual_override: true }).eq('id', 1);
-    await sendTelegramMessage('⏸️ **系统已暂停** ⏸️');
+    await sendTelegramMessage(TELEGRAM_CHAT_ID, '⏸️ **系统已暂停** ⏸️');
   } 
   else if (command === '/resume') {
     await supabase.from('macro_state').update({ manual_override: false }).eq('id', 1);
-    await sendTelegramMessage('🚀 **系统已恢复** 🚀');
+    await sendTelegramMessage(TELEGRAM_CHAT_ID, '🚀 **系统已恢复** 🚀');
   }
-  // ... (其他指令 /panic, /confirm_panic 的逻辑)
 }
 
 /**
@@ -95,9 +103,15 @@ async function handleTradingViewWebhook(incomingData) {
         console.warn('Unauthorized TradingView webhook call.');
         return;
     }
-    // ... (省略了完整的V6版本交易决策逻辑，因为它很长，但逻辑不变)
-    await sendTelegramMessage(`🔔 **收到信号**: ${incomingData.strategy_name}`);
-    // ... 所有的状态判断、风控过滤、影子/实盘交易执行...
+    // ... (此处省略了完整的V6版本中的交易决策逻辑)
+    await sendTelegramMessage(TELEGRAM_CHAT_ID, `🔔 **收到信号**: ${incomingData.strategy_name}`);
+    
+    if (IS_PAPER_TRADING_MODE) {
+        await supabase.from('paper_trades').insert({ /* ...交易数据... */ });
+        await sendTelegramMessage(TELEGRAM_CHAT_ID, `📝 **模拟开仓成功** 📝`);
+    } else {
+        await createSmartTrade({ /* ...交易参数... */ });
+    }
 }
 
 
@@ -131,13 +145,18 @@ app.listen(port, async () => {
   console.log(`V7 Engine is running on port ${port}. Mode: ${IS_PAPER_TRADING_MODE ? 'Paper' : 'Live'}`);
 
   // 自动为Telegram设置Webhook
-  try {
-    const webhookUrl = `${RENDER_EXTERNAL_URL}${TELEGRAM_WEBHOOK_PATH}`;
-    await bot.setWebHook(webhookUrl);
-    console.log(`Telegram webhook successfully set to: ${webhookUrl}`);
-    await sendTelegramMessage(`✅ **V7引擎启动成功 (Webhook模式)** ✅\n当前模式: **${IS_PAPER_TRADING_MODE ? '影子交易' : '实盘'}**`);
-  } catch (error) {
-    console.error('Failed to set Telegram webhook:', error.message);
-    await sendTelegramMessage(`🚨 **V7引擎启动失败** 🚨\n设置Telegram Webhook失败: ${error.message}`);
+  if (RENDER_EXTERNAL_URL && TELEGRAM_BOT_TOKEN) {
+    try {
+      const webhookUrl = `${RENDER_EXTERNAL_URL}${TELEGRAM_WEBHOOK_PATH}`;
+      await bot.setWebHook(webhookUrl);
+      console.log(`Telegram webhook successfully set to: ${webhookUrl}`);
+      await sendTelegramMessage(TELEGRAM_CHAT_ID, `✅ **V7引擎启动成功 (Webhook模式)** ✅\n当前模式: **${IS_PAPER_TRADING_MODE ? '影子交易' : '实盘'}**`);
+    } catch (error) {
+      console.error('Failed to set Telegram webhook:', error.message);
+      await sendTelegramMessage(TELEGRAM_CHAT_ID, `🚨 **V7引擎启动失败** 🚨\n设置Telegram Webhook失败: ${error.message}`);
+    }
+  } else {
+      console.error('Missing RENDER_EXTERNAL_URL or TELEGRAM_BOT_TOKEN. Cannot set webhook.');
+      await sendTelegramMessage(TELEGRAM_CHAT_ID, `🚨 **V7引擎配置错误** 🚨\n缺少关键环境变量，无法设置Webhook。`);
   }
 });

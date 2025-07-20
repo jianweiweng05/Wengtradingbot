@@ -1,17 +1,15 @@
 {
-  "name": "tradingbot",
+  "name": "wengtradingbot-v9",
   "version": "1.0.0",
-  "description": "",
+  "description": "Final Version",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "@supabase/supabase-js": "^2.44.4",
     "express": "^4.19.2",
-    "node-telegram-bot-api": "^0.66.0"
+    "node-telegram-bot-api": "^0.66.0",
+    "crypto": "^1.0.1"
   }
 }
